@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Cooking Mama - 4:3 Horizontal</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background-color: #111;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        /* 4:3 橫向遊戲容器 */
+        #gameContainer {
+            position: relative;
+            width: 96vw;
+            height: 72vw;
+            max-width: 800px;
+            max-height: 600px;
+            background-color: #000;
+            box-shadow: 0 0 25px rgba(0,0,0,0.9);
+            overflow: hidden;
+        }
+        /* 背景圖片 */
+        .bg-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-size: cover;
+            background-position: center;
+            z-index: 1;
+            background-image: url('images/bg_1.jpg'), url('bg_1.jpg');
+        }
+        /* 自訂封面圖片容器 */
+        #startScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 15;
+            background-size: cover;
+            background-position: center;
+            background-image: url('images/bg_start.jpg'), url('bg_start.jpg');
+            background-color: #222;
+            cursor: pointer;
+        }
+        /* 遊戲畫布 */
+        #gameCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    <!-- 自訂封面 -->
+    <div id="startScreen"></div>
+
+    <!-- 遊戲背景圖片 -->
+    <div id="bgImage" class="bg-image"></div>
+
+    <!-- 遊戲畫布 -->
+    <canvas id="gameCanvas"></canvas>
+</div>
+
+<!-- 背景音樂 -->
+<audio id="bgm" loop preload="auto">
+    <source src="images/bgm.mp3" type="audio/mpeg">
+    <source src="bgm.mp3" type="audio/mpeg">
+</audio>
+
+<script>
+function initGame() {
+    const canvas = document.getElementById('gameCanvas');
+    const bgImage = document.getElementById('bgImage');
+    const startScreen = document.getElementById('startScreen');
+    const bgm = document.getElementById('bgm');
+
+    if (!canvas || !bgImage) return;
+    
+    const ctx = canvas.getContext('2d');
+
+    const GAME_WIDTH = 800;
+    const GAME_HEIGHT = 600;
+    canvas.width = GAME_WIDTH;
+    canvas.height = GAME_HEIGHT;
+
+    // 預載入揮刀圖片
+    const img2 = new Image(); 
+    img2.src = 'images/bg_2.jpg';
+    img2.onerror = () => { img2.src = 'bg_2.jpg'; };
+
+    const img3 = new Image(); 
+    img3.src = 'images/bg_3.jpg';
+    img3.onerror = () => { img3.src = 'bg_3.jpg'; };
+
+    let score = 0;
+    let lives = 3;
+    let gameStarted = false;
+    let gameOver = false;
+    let items = [];
+    let slicedPieces = [];
+    let explosions = [];
+    let knifeSlash = null;
+
+    let audioCtx = null;
+    let animTimer1 = null;
+    let animTimer2 = null;
+
+    // 安全播放音樂
+    function startBGM() {
+        if (bgm && bgm.paused) {
+            bgm.volume = 0.4;
+            let playPromise = bgm.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(error => {
+                    console.log("Audio play blocked or file missing:", error);
+                });
+            }
+        }
+    }
+
+    function playSound(type) {
+        try {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            const now = audioCtx.currentTime;
+
+            if (type === 'slash') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(900, now);
+                osc.frequency.exponentialRampToValueAtTime(100, now + 0.08);
+                gain.gain.setValueAtTime(0.3, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.08);
+                osc.start(now);
+                osc.stop(now + 0.08);
+            } else if (type === 'hit') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(350, now);
+                osc.frequency.exponentialRampToValueAtTime(700, now + 0.1);
+                gain.gain.setValueAtTime(0.4, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.1);
+                osc.start(now);
+                osc.stop(now + 0.1);
+            } else if (type === 'explosion') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(180, now);
+                osc.frequency.linearRampToValueAtTime(30, now + 0.3);
+                gain.gain.setValueAtTime(0.6, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.3);
+                osc.start(now);
+                osc.stop(now + 0.3);
+            }
+        } catch(e) {}
+    }
+
+    class FoodItem {
+        constructor(type) {
+            this.type = type;
+            this.x = GAME_WIDTH / 2 + (Math.random() * 260 - 130);
+            this.y = GAME_HEIGHT + 40;
+            this.vx = (Math.random() - 0.5) * 4;
+            this.vy = -(Math.random() * 2 + 15);
+            this.gravity = 0.32;
+            this.isSliced = false;
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += this.gravity;
+        }
+
+        draw() {
+            if (this.isSliced) return;
+            ctx.save();
+            ctx.translate(Math.round(this.x), Math.round(this.y));
+            ctx.scale(1.7, 1.7);
+
+            if (this.type === 'tomato') {
+                ctx.fillStyle = '#1b5e20';
+                ctx.fillRect(-6, -22, 12, 6);
+                ctx.fillRect(-3, -25, 6, 4);
+
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(-21, -16, 42, 32);
+                ctx.fillRect(-16, -21, 32, 42);
+
+                ctx.fillStyle = '#d50000';
+                ctx.fillRect(-19, -14, 38, 28);
+                ctx.fillRect(-14, -19, 28, 38);
+
+                ctx.fillStyle = '#ff8a80';
+                ctx.fillRect(-12, -12, 8, 8);
+            } else if (this.type === 'dumpling') {
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(-22, -8, 44, 20);
+                ctx.fillRect(-18, -14, 36, 28);
+                ctx.fillRect(-16, -18, 6, 6);
+                ctx.fillRect(-6, -20, 6, 6);
+                ctx.fillRect(4, -20, 6, 6);
+                ctx.fillRect(12, -18, 6, 6);
+
+                ctx.fillStyle = '#fffde7';
+                ctx.fillRect(-20, -6, 40, 16);
+                ctx.fillRect(-16, -12, 32, 22);
+
+                ctx.fillStyle = '#fbc02d';
+                ctx.fillRect(-16, 4, 32, 6);
+
+                ctx.fillStyle = '#e6ee9c';
+                ctx.fillRect(-14, -16, 4, 10);
+                ctx.fillRect(-4, -18, 4, 12);
+                ctx.fillRect(6, -18, 4, 12);
+                ctx.fillRect(14, -16, 4, 10);
+
+                ctx.fillStyle = '#afb42b';
+                ctx.fillRect(-12, -14, 2, 8);
+                ctx.fillRect(-2, -16, 2, 10);
+                ctx.fillRect(8, -16, 2, 10);
+            }
+
+            ctx.restore();
+        }
+    }
+
+    class Piece {
+        constructor(x, y, isLeft, color) {
+            this.x = x;
+            this.y = y;
+            this.vx = isLeft ? -5.5 : 5.5;
+            this.vy = -3;
+            this.gravity = 0.45;
+            this.isLeft = isLeft;
+            this.color = color;
+            this.rotation = 0;
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += this.gravity;
+            this.rotation += this.isLeft ? -0.15 : 0.15;
+        }
+
+        draw() {
+            ctx.save();
+            ctx.translate(Math.round(this.x), Math.round(this.y));
+            ctx.scale(1.7, 1.7);
+            ctx.rotate(this.rotation);
+            ctx.fillStyle = this.color;
+            if (this.isLeft) {
+                ctx.fillRect(-16, -16, 16, 32);
+            } else {
+                ctx.fillRect(0, -16, 16, 32);
+            }
+            ctx.restore();
+        }
+    }
+
+    class ExplosionParticle {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.vx = (Math.random() - 0.5) * 16;
+            this.vy = (Math.random() - 0.5) * 16;
+            this.size = Math.random() * 10 + 5;
+            this.color = ['#ff1744', '#ffea00', '#ff9100', '#ffffff'][Math.floor(Math.random() * 4)];
+            this.life = 20;
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.life--;
+        }
+
+        draw() {
+            if (this.life <= 0) return;
+            ctx.fillStyle = this.color;
+            ctx.fillRect(Math.round(this.x), Math.round(this.y), this.size, this.size);
+        }
+    }
+
+    // 繪製心形血量 (scale 放大成 6，即一倍大)
+    function drawHeart(x, y, filled) {
+        ctx.save();
+        ctx.fillStyle = filled ? '#ff1744' : '#424242';
+        
+        const pixelData = [
+            [0,1,1,0,0,1,1,0],
+            [1,1,1,1,1,1,1,1],
+            [1,1,1,1,1,1,1,1],
+            [0,1,1,1,1,1,1,0],
+            [0,0,1,1,1,1,0,0],
+            [0,0,0,1,1,0,0,0]
+        ];
+
+        const scale = 6; // 放大一倍
+        for (let r = 0; r < pixelData.length; r++) {
+            for (let c = 0; c < pixelData[r].length; c++) {
+                if (pixelData[r][c] === 1) {
+                    ctx.fillRect(x + c * scale, y + r * scale, scale, scale);
+                }
+            }
+        }
+        ctx.restore();
+    }
+
+    let spawnTimer = 0;
+    function handleItems() {
+        if (!gameStarted || gameOver) {
+            for (let item of items) item.draw();
+            for (let p of slicedPieces) p.draw();
+            for (let ex of explosions) ex.draw();
+            return;
+        }
+
+        spawnTimer++;
+
+        if (items.length === 0 && spawnTimer > 100) {
+            const type = Math.random() < 0.25 ? 'dumpling' : 'tomato';
+            items.push(new FoodItem(type));
+            spawnTimer = 0;
+        }
+
+        for (let i = items.length - 1; i >= 0; i--) {
+            let item = items[i];
+            item.update();
+            item.draw();
+            if (item.y > GAME_HEIGHT + 60) {
+                items.splice(i, 1);
+            }
+        }
+
+        for (let i = slicedPieces.length - 1; i >= 0; i--) {
+            let p = slicedPieces[i];
+            p.update();
+            p.draw();
+            if (p.y > GAME_HEIGHT + 60) slicedPieces.splice(i, 1);
+        }
+
+        for (let i = explosions.length - 1; i >= 0; i--) {
+            let ex = explosions[i];
+            ex.update();
+            ex.draw();
+            if (ex.life <= 0) explosions.splice(i, 1);
+        }
+    }
+
+    function trigger3FrameAnimation() {
+        if (animTimer1) clearTimeout(animTimer1);
+        if (animTimer2) clearTimeout(animTimer2);
+
+        bgImage.style.backgroundImage = `url('${img2.src}')`;
+
+        animTimer1 = setTimeout(() => {
+            bgImage.style.backgroundImage = `url('${img3.src}')`;
+            
+            animTimer2 = setTimeout(() => {
+                bgImage.style.backgroundImage = "url('images/bg_1.jpg'), url('bg_1.jpg')";
+            }, 100);
+        }, 80);
+    }
+
+    function swingKnife() {
+        startBGM();
+
+        if (!gameStarted) {
+            gameStarted = true;
+            if (startScreen) startScreen.style.display = 'none';
+            return;
+        }
+
+        if (gameOver) {
+            resetGame();
+            return;
+        }
+
+        playSound('slash');
+        trigger3FrameAnimation();
+
+        knifeSlash = { opacity: 1.0 };
+
+        for (let i = items.length - 1; i >= 0; i--) {
+            let item = items[i];
+            if (!item.isSliced) {
+                if (item.y > 40 && item.y < GAME_HEIGHT - 40) {
+                    item.isSliced = true;
+
+                    if (item.type === 'tomato') {
+                        playSound('hit');
+                        score += 10;
+                        slicedPieces.push(new Piece(item.x, item.y, true, '#d50000'));
+                        slicedPieces.push(new Piece(item.x, item.y, false, '#d50000'));
+                    } else if (item.type === 'dumpling') {
+                        playSound('explosion');
+                        lives--;
+                        for (let k = 0; k < 35; k++) {
+                            explosions.push(new ExplosionParticle(item.x, item.y));
+                        }
+                        if (lives <= 0) gameOver = true;
+                    }
+                    items.splice(i, 1);
+                }
+            }
+        }
+    }
+
+    function drawUI() {
+        if (!gameStarted) return;
+
+        // 分數顯示 (大小改為 48px，放大一倍)
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 48px monospace';
+        ctx.fillText(`SCORE: ${score}`, 25, 60);
+
+        // 心形血量顯示 (位置與間距隨比例調整)
+        for (let i = 0; i < 3; i++) {
+            drawHeart(GAME_WIDTH - 200 + (i * 60), 20, i < lives);
+        }
+
+        if (knifeSlash) {
+            ctx.strokeStyle = `rgba(255, 255, 255, ${knifeSlash.opacity})`;
+            ctx.lineWidth = 8;
+            ctx.beginPath();
+            ctx.moveTo(50, GAME_HEIGHT / 2 + 80);
+            ctx.lineTo(GAME_WIDTH - 50, GAME_HEIGHT / 2 - 80);
+            ctx.stroke();
+
+            knifeSlash.opacity -= 0.12;
+            if (knifeSlash.opacity <= 0) knifeSlash = null;
+        }
+
+        if (gameOver) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+            ctx.fillStyle = '#ff1744';
+            ctx.font = 'bold 44px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('GAME OVER', GAME_WIDTH / 2, GAME_HEIGHT / 2 - 50);
+
+            ctx.fillStyle = '#ffeb3b';
+            ctx.font = 'bold 28px monospace';
+            ctx.fillText(`FINAL SCORE: ${score}`, GAME_WIDTH / 2, GAME_HEIGHT / 2 + 10);
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '18px monospace';
+            ctx.fillText('CLICK TO RESTART', GAME_WIDTH / 2, GAME_HEIGHT / 2 + 65);
+            ctx.textAlign = 'left';
+        }
+    }
+
+    function resetGame() {
+        score = 0;
+        lives = 3;
+        gameOver = false;
+        items = [];
+        slicedPieces = [];
+        explosions = [];
+        spawnTimer = 0;
+    }
+
+    function gameLoop() {
+        ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        handleItems();
+        drawUI();
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    const container = document.getElementById('gameContainer');
+    
+    container.addEventListener('click', () => {
+        swingKnife();
+    });
+
+    container.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        swingKnife();
+    }, { passive: false });
+
+    gameLoop();
+}
+
+if (document.readyState === 'interactive' || document.readyState === 'complete') {
+    initGame();
+} else {
+    document.addEventListener('DOMContentLoaded', initGame);
+}
+</script>
+
+</body>
+</html>
